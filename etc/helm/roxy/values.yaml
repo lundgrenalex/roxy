@@ -1,0 +1,113 @@
+replicaCount: 1
+
+image:
+  repository: lundgrenalex/evm-proxy-node
+  tag: "v0.1.0"
+  pullPolicy: IfNotPresent
+  digest: "sha256:df916113a117a1496dcec32becc6e2b0a7b6b5ef1e630e41ede587b60b67cab9"
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: /metrics
+  prometheus.io/port: "8080"
+
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /metrics
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 20
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /metrics
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 75
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+env: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+
+rustLog: info
+
+config:
+  bind_addr: "0.0.0.0:8080" # EVM JSON-RPC proxy listen address
+  metrics_path: "/metrics"
+  upstreams:
+    gnosis:
+      routing_type: "round_robin"
+      urls:
+      - https://alchemyurltognosis
+      - https://backup-gnosis
+    ethereum:
+      urls:
+      - https://private-eth-mainnet
+
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

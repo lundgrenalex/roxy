@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "roxy.fullname" . }}
+  labels:
+    {{- include "roxy.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- include "roxy.config" . | nindent 4 }}

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: roxy
+description: High-performance EVM JSON-RPC proxy with metrics instrumentation.
+icon: https://raw.githubusercontent.com/helm/helm/main/docs/img/helm.svg
+type: application
+version: 0.1.0
+appVersion: 0.1.0

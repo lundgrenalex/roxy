@@ -1,0 +1,13 @@
+1. Get the application URL by running these commands:
+{{- if .Values.ingress.enabled }}
+  {{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ (index .paths 0).path | default "/" }}
+  {{- end }}
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  kubectl get svc {{ include "roxy.fullname" . }} -n {{ .Release.Namespace }}
+{{- else }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "roxy.name" . }}",app.kubernetes.io/instance={{ .Release.Name }} -o jsonpath="{.items[0].metadata.name}")
+  kubectl port-forward --namespace {{ .Release.Namespace }} $POD_NAME 8080:8080
+{{- end }}
+
+2. Scrape metrics from http://<service>:{{ .Values.service.port }}{{ default "/metrics" .Values.config.metrics_path }} or via ServiceMonitor if enabled.

@@ -1,0 +1,23 @@
+# Base configuration for the Rust EVM JSON-RPC proxy.
+# Copy this file and adjust the URLs for your deployment. Routes are mounted
+# automatically as /gate/{upstream-key}.
+
+bind_addr: "0.0.0.0:8080"
+metrics_path: "/metrics"
+
+upstreams:
+  # Example upstream serving the Gnosis chain (EVM). Requests hitting /gate/gnosis/* will be forwarded.
+  gnosis:
+    routing_type: "round_robin"
+    timeout_ms: 10000
+    max_body_bytes: 2097152
+    urls:
+    - "https://alchemyurltognosis"
+    - "https://backup-gnosis"
+
+  # Example upstream for Ethereum mainnet (EVM). Requests hit /gate/ethereum-mainnet/*.
+  ethereum-mainnet:
+    timeout_ms: 8000
+    max_body_bytes: 1048576
+    urls:
+    - "https://private-eth-mainnet"
