@@ -2,9 +2,9 @@ replicaCount: 1
 
 image:
   repository: lundgrenalex/evm-proxy-node
-  tag: "v0.1.0"
+  tag: "v0.1.1"
   pullPolicy: IfNotPresent
-  digest: "sha256:df916113a117a1496dcec32becc6e2b0a7b6b5ef1e630e41ede587b60b67cab9"
+  digest: "sha256:384375b13e2ef672cc13f493d0e9a53592365fe3b170f8febe5db1a239ccabe3"
 
 imagePullSecrets: []
 

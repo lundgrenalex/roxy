@@ -8,12 +8,13 @@ WORKDIR /app
 # Pre-copy manifests to leverage Docker layer caching
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 COPY config.yaml ./config.yaml
 
 # Build the binary in release mode
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=tmpfs,target=/tmp \
     cargo build --release \
     && cp /app/target/release/roxy /app/roxy
