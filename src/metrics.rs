@@ -18,6 +18,7 @@ pub struct Metrics {
     inflight_requests: IntGaugeVec,
     latency_seconds: HistogramVec,
     method_calls_total: IntCounterVec,
+    method_latency_seconds: HistogramVec,
 }
 
 impl Metrics {
@@ -55,6 +56,16 @@ impl Metrics {
         )?;
         registry.register(Box::new(method_calls_total.clone()))?;
 
+        let method_latency_seconds = HistogramVec::new(
+            HistogramOpts::new("rpc_method_latency_seconds", "Latency per JSON-RPC method")
+                .namespace("proxy")
+                .buckets(vec![
+                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                ]),
+            &["upstream", "method"],
+        )?;
+        registry.register(Box::new(method_latency_seconds.clone()))?;
+
         let latency_seconds = HistogramVec::new(
             HistogramOpts::new("request_latency_seconds", "Proxy latency in seconds")
                 .namespace("proxy")
@@ -73,6 +84,7 @@ impl Metrics {
             inflight_requests,
             latency_seconds,
             method_calls_total,
+            method_latency_seconds,
         })
     }
 
@@ -126,6 +138,16 @@ impl Metrics {
         }
     }
 
+    /// Record latency observations for the JSON-RPC methods present in the request.
+    pub fn record_method_latency(&self, upstream: &str, methods: &[String], elapsed: Duration) {
+        let value = elapsed.as_secs_f64();
+        for method in methods {
+            self.method_latency_seconds
+                .with_label_values(&[upstream, method.as_str()])
+                .observe(value);
+        }
+    }
+
     /// Snapshot all metric families for Prometheus exposition.
     pub fn gather(&self) -> Vec<prometheus::proto::MetricFamily> {
         self.registry.gather()
@@ -165,6 +187,28 @@ mod tests {
             .method_calls_total
             .with_label_values(&["gnosis", "eth_getLogs"])
             .get();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 1);
+    }
+
+    #[test]
+    fn record_method_latency_observes_histogram() {
+        let metrics = Metrics::new().expect("metrics constructed");
+        metrics.record_method_latency(
+            "gnosis",
+            &["eth_call".to_string(), "eth_getLogs".to_string()],
+            Duration::from_millis(50),
+        );
+
+        let first = metrics
+            .method_latency_seconds
+            .with_label_values(&["gnosis", "eth_call"])
+            .get_sample_count();
+        let second = metrics
+            .method_latency_seconds
+            .with_label_values(&["gnosis", "eth_getLogs"])
+            .get_sample_count();
 
         assert_eq!(first, 1);
         assert_eq!(second, 1);

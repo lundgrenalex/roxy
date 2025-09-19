@@ -101,6 +101,7 @@ Prometheus scrape lives at whatever `METRICS_PATH` says (defaults to `/metrics`)
 - `roxy_proxy_method_calls_total{upstream,method}`
 - `roxy_proxy_request_latency_seconds_bucket{upstream,method,...}`
 - `roxy_proxy_inflight_requests{upstream}`
+- `roxy_rpc_method_latency_seconds_bucket{upstream,method}`
 
 Hook those into Grafana, brag about low latencies, repeat.
 

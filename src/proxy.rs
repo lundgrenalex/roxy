@@ -136,9 +136,11 @@ pub(crate) async fn proxy_handler(
         }
     };
 
+    let mut rpc_methods: Vec<String> = Vec::new();
     if let Ok(methods) = extract_methods(body_bytes.as_ref()) {
         if !methods.is_empty() {
             state.metrics.record_method_calls(route.name(), &methods);
+            rpc_methods = methods;
         }
     }
 
@@ -158,6 +160,12 @@ pub(crate) async fn proxy_handler(
             state
                 .metrics
                 .record_response(route.name(), &method, response.status(), elapsed);
+
+            if !rpc_methods.is_empty() {
+                state
+                    .metrics
+                    .record_method_latency(route.name(), &rpc_methods, elapsed);
+            }
 
             let (mut parts, body) = response.into_parts();
             parts
