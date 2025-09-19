@@ -1,9 +1,16 @@
 # Changelog
 
+## v0.1.4
+
+- Raised default per-upstream timeout to 5 minutes and max body size to 10 MiB across config, examples, and Helm values (Chainstack profile included).
+- Added structured warnings when requests exceed body limits or when upstream calls time out.
+- Published the JSON-RPC method error counter (`roxy_rpc_method_errors_total`) and updated documentation.
+
 ## v0.1.3
 
 - Added per-method JSON-RPC error counter (`roxy_rpc_method_errors_total`) with labelled buckets (parse errors, invalid params, execution errors, etc.).
 - Proxy now inspects upstream responses and records method-specific latency/errors without leaving the Hyper fast path.
+- Raised default upstream request timeout to 5 minutes and request body cap to 10 MiB (configurable per route).
 
 ## v0.1.2
 

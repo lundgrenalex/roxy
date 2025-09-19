@@ -28,19 +28,19 @@ metrics_path: "/metrics"        # optional
 upstreams:
   gnosis:                        # route key => /gate/gnosis/*
     routing_type: "round_robin"  # optional (currently only round_robin)
-    timeout_ms: 10000            # optional per-upstream timeout (10s default)
-    max_body_bytes: 2097152      # optional per-upstream body cap (2 MiB default)
+    timeout_ms: 300000           # optional per-upstream timeout (defaults to 5 minutes)
+    max_body_bytes: 10485760     # optional per-upstream body cap (defaults to 10 MiB)
     urls:
       - "https://alchemyurltognosis"
       - "https://backup-gnosis"     # more URLs = round-robin love
   ethereum-mainnet:              # route key => /gate/ethereum-mainnet/*
-    timeout_ms: 8000
-    max_body_bytes: 1048576
+    timeout_ms: 300000
+    max_body_bytes: 10485760
     urls:
       - "https://private-eth-mainnet"
 ```
 
-Give every upstream at least one full URL. Roxy auto-mounts each route at `/gate/{name}` after sanitising the key (spaces and punctuation collapse to `-`). Multiple URLs get served round-robin style, and the longest prefix still wins the match. Tune `timeout_ms` and `max_body_bytes` per upstream to override the defaults (10s, 2 MiB).
+Give every upstream at least one full URL. Roxy auto-mounts each route at `/gate/{name}` after sanitising the key (spaces and punctuation collapse to `-`). Multiple URLs get served round-robin style, and the longest prefix still wins the match. Tune `timeout_ms` and `max_body_bytes` per upstream to override the defaults (5 minutes, 10 MiB).
 
 Need more logs? Tweak `RUST_LOG`, e.g. `RUST_LOG=info,tower_http=warn`.
 
@@ -102,6 +102,7 @@ Prometheus scrape lives at whatever `METRICS_PATH` says (defaults to `/metrics`)
 - `roxy_proxy_request_latency_seconds_bucket{upstream,method,...}`
 - `roxy_proxy_inflight_requests{upstream}`
 - `roxy_rpc_method_latency_seconds_bucket{upstream,method}`
+- `roxy_rpc_method_errors_total{upstream,method,error}`
 
 Hook those into Grafana, brag about low latencies, repeat.
 

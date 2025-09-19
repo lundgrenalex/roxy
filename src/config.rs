@@ -25,9 +25,9 @@ pub const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 /// Base path reserved for inbound JSON-RPC routes.
 pub const DEFAULT_ROUTE_BASE_PATH: &str = "/gate";
 /// Default per-upstream request timeout in milliseconds.
-pub const DEFAULT_UPSTREAM_TIMEOUT_MS: u64 = 10_000;
+pub const DEFAULT_UPSTREAM_TIMEOUT_MS: u64 = 300_000;
 /// Default maximum request body size in bytes.
-pub const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+pub const DEFAULT_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Runtime configuration derived from a YAML file.
 #[derive(Debug, Clone)]

@@ -124,6 +124,11 @@ pub(crate) async fn proxy_handler(
             state
                 .metrics
                 .record_error(route.name(), &method, "body_read");
+            warn!(
+                upstream = route.name(),
+                method = %method,
+                "failed to read request body: {err}"
+            );
             return Err(ProxyError::BodyRead {
                 reason: err.to_string(),
             });
@@ -132,6 +137,12 @@ pub(crate) async fn proxy_handler(
             state
                 .metrics
                 .record_error(route.name(), &method, "body_too_large");
+            warn!(
+                upstream = route.name(),
+                method = %method,
+                limit_bytes = max_body_bytes,
+                "request body exceeded configured limit"
+            );
             return Err(ProxyError::BodyTooLarge {
                 limit: max_body_bytes,
             });
@@ -211,6 +222,12 @@ pub(crate) async fn proxy_handler(
             state
                 .metrics
                 .record_error(route.name(), &method, "upstream_timeout");
+            warn!(
+                upstream = route.name(),
+                method = %method,
+                timeout_ms = route.timeout().as_millis(),
+                "upstream request timed out"
+            );
             Err(ProxyError::UpstreamTimeout {
                 upstream: route.name_arc(),
             })
