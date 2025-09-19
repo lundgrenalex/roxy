@@ -12,6 +12,7 @@ Questions, beef, or memes? Catch me on X: [@fortvi](https://x.com/fortvi).
 - Pulls upstream config straight from environment variables.
 - Keeps an async HTTPS client warm (HTTP/1.1 + HTTP/2) with pooling so latency stays chill.
 - Exposes Prometheus metrics for request counts, latencies, errors, and in-flight calls.
+- Understands gzip-encoded upstream responses when extracting JSON-RPC error telemetry, so your dashboards stay accurate.
 - Shuts down gracefully so rolling updates don’t faceplant.
 - Per-upstream request guards for max body size and upstream timeout.
 - Hyper-fast hot path (≈45 µs per JSON-RPC dispatch on loopback with Hyper client).
@@ -120,6 +121,16 @@ proxy_hot_path/dispatch time:   [44.7 µs 45.9 µs 47.5 µs]
 ```
 
 Each iteration covers the full client → proxy → upstream round trip using the real Hyper client.
+
+## Integration Tests
+
+Minimal smoke tests live under `tests/integration`. Run them alongside unit tests with:
+
+```sh
+cargo test
+```
+
+The harness stands up a local upstream and ensures Roxy proxies JSON-RPC requests end to end.
 
 ## On the Horizon
 

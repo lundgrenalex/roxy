@@ -1,9 +1,11 @@
 //! HTTP routing logic that binds configuration, metrics, and the shared HTTP client together.
 
 use std::borrow::Cow;
-use std::net::SocketAddr;
+use std::convert::Infallible;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
+use std::io::Read;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
@@ -14,7 +16,7 @@ use axum::routing::get;
 use axum::Error as AxumError;
 use axum::Router;
 use bytes::{Bytes, BytesMut};
-use futures_util::stream::StreamExt;
+use futures_util::stream::{self, StreamExt};
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use serde_json::Value;
@@ -22,6 +24,7 @@ use tokio::time::timeout;
 use tower::ServiceBuilder;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{warn, Level};
+use flate2::read::GzDecoder;
 
 use crate::config::{PreparedUpstream, Route};
 use crate::errors::ProxyError;
@@ -46,11 +49,10 @@ impl AppState {
         }
     }
 
-    fn match_route(&self, path: &str) -> Option<Route> {
+    fn match_route(&self, path: &str) -> Option<&Route> {
         self.routes
             .iter()
             .find(|route| route.matches(path))
-            .cloned()
     }
 }
 
@@ -150,10 +152,14 @@ pub(crate) async fn proxy_handler(
     };
 
     let mut rpc_methods: Vec<String> = Vec::new();
-    if let Ok(methods) = extract_methods(body_bytes.as_ref()) {
+    let mut id_to_method: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Ok((methods, idmap)) = extract_method_id_map(body_bytes.as_ref()) {
         if !methods.is_empty() {
             state.metrics.record_method_calls(route.name(), &methods);
             rpc_methods = methods;
+        }
+        if !idmap.is_empty() {
+            id_to_method = idmap;
         }
     }
 
@@ -190,15 +196,36 @@ pub(crate) async fn proxy_handler(
                 }
             })?;
             let body_bytes = collected.to_bytes();
+            let metrics_body = response_bytes_for_metrics(&parts.headers, body_bytes.as_ref());
 
             if !rpc_methods.is_empty() {
-                let error_labels = extract_rpc_error_labels(body_bytes.as_ref());
-                if !error_labels.is_empty() {
-                    for method_name in &rpc_methods {
-                        for error in &error_labels {
-                            state
-                                .metrics
-                                .record_method_errors(route.name(), method_name, error);
+                let pairs = extract_method_error_pairs(metrics_body.as_ref(), &id_to_method);
+                let mut fallback_errors: Option<Vec<String>> = None;
+
+                if !pairs.is_empty() {
+                    let mut recorded_any = false;
+                    for (method_name, error) in pairs.iter().filter(|(method, _)| method != "unknown") {
+                        state
+                            .metrics
+                            .record_method_errors(route.name(), method_name.as_str(), error.as_str());
+                        recorded_any = true;
+                    }
+
+                    if !recorded_any {
+                        fallback_errors = Some(pairs.into_iter().map(|(_, error)| error).collect());
+                    }
+                } else {
+                    fallback_errors = Some(extract_rpc_error_labels(metrics_body.as_ref()));
+                }
+
+                if let Some(error_labels) = fallback_errors {
+                    if !error_labels.is_empty() {
+                        for method_name in &rpc_methods {
+                            for error in &error_labels {
+                                state
+                                    .metrics
+                                    .record_method_errors(route.name(), method_name.as_str(), error.as_str());
+                            }
                         }
                     }
                 }
@@ -207,12 +234,22 @@ pub(crate) async fn proxy_handler(
             parts
                 .headers
                 .append(header::VIA, HeaderValue::from_static("1.1 roxy"));
-            Ok(Response::from_parts(parts, Body::from(body_bytes)))
+            parts.headers.remove(header::CONTENT_LENGTH);
+            parts.headers.remove(header::TRANSFER_ENCODING);
+            let stream = stream::once(async move { Ok::<Bytes, Infallible>(body_bytes) });
+            let body = Body::from_stream(stream);
+            Ok(Response::from_parts(parts, body))
         }
         Ok(Err(err)) => {
             state
                 .metrics
                 .record_error(route.name(), &method, "upstream");
+            warn!(
+                upstream = route.name(),
+                method = %method,
+                error = %err,
+                "upstream request failed"
+            );
             Err(ProxyError::Upstream {
                 upstream: route.name_arc(),
                 source: err,
@@ -242,7 +279,12 @@ fn rewrite_request_headers(
     original_host: Option<HeaderValue>,
     inferred_proto: &str,
 ) {
-    let peer_ip = peer_addr.ip().to_string();
+    let peer_ip_addr = peer_addr.ip();
+    let peer_ip = peer_ip_addr.to_string();
+    let forwarded_peer = match peer_ip_addr {
+        IpAddr::V4(_) => peer_ip.clone(),
+        IpAddr::V6(addr) => format!("[{addr}]"),
+    };
     let forwarded_chain = if let Some(existing) = req.headers().get("x-forwarded-for") {
         match existing.to_str() {
             Ok(value) if !value.trim().is_empty() => format!("{value}, {peer_ip}"),
@@ -282,7 +324,7 @@ fn rewrite_request_headers(
             .expect("validated host header during configuration"),
     );
 
-    let forwarded_value = format!("for=\"{}\";proto={}", peer_ip, proto_value);
+    let forwarded_value = format!("for=\"{}\";proto={}", forwarded_peer, proto_value);
     req.headers_mut().insert(
         header::HeaderName::from_static("forwarded"),
         HeaderValue::from_str(&forwarded_value)
@@ -306,7 +348,7 @@ enum BodyCollectError {
 
 async fn collect_body_with_limit(body: Body, limit: usize) -> Result<Bytes, BodyCollectError> {
     let mut stream = body.into_data_stream();
-    let mut buffer = BytesMut::with_capacity(std::cmp::min(limit, 8 * 1024));
+    let mut buffer = BytesMut::with_capacity(std::cmp::min(limit, 16 * 1024));
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(BodyCollectError::Io)?;
@@ -319,12 +361,140 @@ async fn collect_body_with_limit(body: Body, limit: usize) -> Result<Bytes, Body
     Ok(buffer.freeze())
 }
 
+fn response_bytes_for_metrics<'a>(headers: &header::HeaderMap, body: &'a [u8]) -> Cow<'a, [u8]> {
+    let encoding = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok());
+
+    if encoding
+        .map(|value| value.eq_ignore_ascii_case("gzip"))
+        .unwrap_or(false)
+    {
+        let mut decoder = GzDecoder::new(body);
+        let mut decoded = Vec::new();
+        match decoder.read_to_end(&mut decoded) {
+            Ok(_) => Cow::Owned(decoded),
+            Err(err) => {
+                warn!(?err, "failed to decode gzip-encoded response for metrics");
+                Cow::Borrowed(body)
+            }
+        }
+    } else {
+        Cow::Borrowed(body)
+    }
+}
+
+#[derive(Deserialize)]
+struct JsonRpcReq<'a> {
+    #[serde(borrow)]
+    method: Option<Cow<'a, str>>,
+    id: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
 #[derive(Deserialize)]
 struct JsonRpcMethod<'a> {
     #[serde(borrow)]
     method: Cow<'a, str>,
 }
 
+fn canonical_id(id: &serde_json::Value) -> String {
+    match id {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn extract_method_id_map(bytes: &[u8]) -> Result<(Vec<String>, std::collections::HashMap<String, String>), serde_json::Error> {
+    let first = bytes.iter().copied().find(|b| !b.is_ascii_whitespace());
+    use std::collections::HashMap;
+    match first {
+        Some(b'{') => {
+            let req: JsonRpcReq<'_> = serde_json::from_slice(bytes)?;
+            let mut methods = Vec::new();
+            let mut map = HashMap::new();
+            if let Some(m) = req.method.as_ref() {
+                methods.push(m.to_string());
+            }
+            if let Some(id) = req.id.as_ref() {
+                if let Some(m) = req.method.as_ref() {
+                    map.insert(canonical_id(id), m.to_string());
+                }
+            }
+            Ok((methods, map))
+        }
+        Some(b'[') => {
+            let reqs: Vec<JsonRpcReq<'_>> = serde_json::from_slice(bytes)?;
+            let mut methods = Vec::with_capacity(reqs.len());
+            let mut map = HashMap::with_capacity(reqs.len());
+            for r in reqs.into_iter() {
+                if let Some(m) = r.method.as_ref() { methods.push(m.to_string()); }
+                if let (Some(id), Some(m)) = (r.id.as_ref(), r.method.as_ref()) {
+                    map.insert(canonical_id(id), m.to_string());
+                }
+            }
+            Ok((methods, map))
+        }
+        _ => Ok((Vec::new(), std::collections::HashMap::new())),
+    }
+}
+
+fn extract_method_error_pairs(bytes: &[u8], id_to_method: &std::collections::HashMap<String, String>) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let parsed = serde_json::from_slice::<serde_json::Value>(bytes);
+    let v = match parsed { Ok(v) => v, Err(_) => return pairs };
+    match v {
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter() {
+                if let Some(err) = item.get("error") {
+                    if let Some(code_v) = err.get("code") {
+                        let code_i = if let Some(i) = code_v.as_i64() { Some(i) } else if let Some(u) = code_v.as_u64() { Some(u as i64) } else if let Some(s) = code_v.as_str() { s.parse::<i64>().ok() } else { None };
+                        if let Some(code) = code_i {
+                            if let Some(label) = map_jsonrpc_error(code) {
+                                if let Some(id) = item.get("id") {
+                                    let key = canonical_id(id);
+                                    if let Some(method) = id_to_method.get(&key) {
+                                        pairs.push((method.clone(), label.to_string()));
+                                        continue;
+                                    }
+                                }
+                                pairs.push(("unknown".to_string(), label.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        obj @ serde_json::Value::Object(_) => {
+            if let Some(err) = obj.get("error") {
+                if let Some(code_v) = err.get("code") {
+                    let code_i = if let Some(i) = code_v.as_i64() { Some(i) } else if let Some(u) = code_v.as_u64() { Some(u as i64) } else if let Some(s) = code_v.as_str() { s.parse::<i64>().ok() } else { None };
+                    if let Some(code) = code_i {
+                        if let Some(label) = map_jsonrpc_error(code) {
+                            if let Some(id) = obj.get("id") {
+                                let key = canonical_id(id);
+                                if let Some(method) = id_to_method.get(&key) {
+                                    pairs.push((method.clone(), label.to_string()));
+                                } else {
+                                    pairs.push(("unknown".to_string(), label.to_string()));
+                                }
+                            } else {
+                                pairs.push(("unknown".to_string(), label.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    pairs
+}
+
+#[cfg(test)]
 fn extract_methods(bytes: &[u8]) -> Result<Vec<String>, serde_json::Error> {
     let first = bytes
         .iter()
@@ -368,6 +538,8 @@ fn error_label_from_value(value: &Value) -> Option<&'static str> {
         map_jsonrpc_error(code)
     } else if let Some(code) = code.as_u64() {
         map_jsonrpc_error(code as i64)
+    } else if let Some(code_str) = code.as_str() {
+        code_str.parse::<i64>().ok().and_then(map_jsonrpc_error)
     } else {
         None
     }
@@ -430,9 +602,12 @@ impl IntoResponse for ProxyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{Request, Uri};
+    use axum::http::{Request, Response, StatusCode, Uri};
+    use flate2::{write::GzEncoder, Compression};
     use futures_util::future::pending;
+    use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
 
     use crate::config::Config;
     use crate::http_client::build_http_client;
@@ -622,6 +797,51 @@ upstreams:
         }
     }
 
+    struct StaticResponseClient {
+        status: StatusCode,
+        body: Arc<Vec<u8>>,
+        headers: Vec<(header::HeaderName, HeaderValue)>,
+    }
+
+    impl StaticResponseClient {
+        fn new(status: StatusCode, body: Vec<u8>) -> Self {
+            Self {
+                status,
+                body: Arc::new(body),
+                headers: Vec::new(),
+            }
+        }
+
+        fn with_header(mut self, name: header::HeaderName, value: HeaderValue) -> Self {
+            self.headers.push((name, value));
+            self
+        }
+    }
+
+    impl HttpClient for StaticResponseClient {
+        fn request(
+            &self,
+            _req: Request<Body>,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<Response<Body>, hyper_util::client::legacy::Error>,
+        > {
+            let status = self.status;
+            let body = self.body.clone();
+            let headers = self.headers.clone();
+            Box::pin(async move {
+                let mut builder = Response::builder().status(status);
+                for (name, value) in headers {
+                    builder = builder.header(name, value);
+                }
+                let response = builder
+                    .body(Body::from((*body).clone()))
+                    .unwrap();
+                Ok(response)
+            })
+        }
+    }
+
     #[tokio::test]
     async fn upstream_timeout_returns_error() {
         let route = build_route();
@@ -646,6 +866,41 @@ upstreams:
         }
     }
 
+    #[tokio::test]
+    async fn rpc_method_errors_recorded_when_ids_missing() {
+        let route = build_route();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(br#"{"jsonrpc":"2.0","error":{"code":-32000}}"#)
+            .expect("gzip write succeeds");
+        let compressed = encoder.finish().expect("gzip finish succeeds");
+        let client: Arc<dyn HttpClient> = Arc::new(
+            StaticResponseClient::new(StatusCode::OK, compressed).with_header(
+                header::HeaderName::from_static("content-encoding"),
+                HeaderValue::from_static("gzip"),
+            ),
+        );
+        let metrics = Metrics::new().expect("metrics constructed");
+        let metrics_handle = metrics.clone();
+        let state = AppState::new(vec![route], client, metrics);
+
+        let request = Request::builder()
+            .uri("/gate/gnosis")
+            .method("POST")
+            .header(HOST, "proxy.local")
+            .body(Body::from(
+                br#"{"jsonrpc":"2.0","method":"eth_call","params":[]}"#.to_vec(),
+            ))
+            .unwrap();
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50_001);
+
+        let result = proxy_handler(State(state), ConnectInfo(peer), request).await;
+        assert!(result.is_ok(), "proxy handler returned error: {result:?}");
+
+        let count = metrics_handle.method_error_count("gnosis", "eth_call", "execution_error");
+        assert_eq!(count, 1);
+    }
+
     #[test]
     fn extract_rpc_error_labels_detects_known_codes() {
         let single =
@@ -656,5 +911,9 @@ upstreams:
         let batch = br#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32601}}, {"jsonrpc":"2.0","id":2,"result":"0x1"}]"#;
         let labels = extract_rpc_error_labels(batch);
         assert_eq!(labels, vec!["method_not_found".to_string()]);
+
+        let string_code = br#"{"jsonrpc":"2.0","error":{"code":"-32002","message":"busy"}}"#;
+        let labels = extract_rpc_error_labels(string_code);
+        assert_eq!(labels, vec!["resource_unavailable".to_string()]);
     }
 }

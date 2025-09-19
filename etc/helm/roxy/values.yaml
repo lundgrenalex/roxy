@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: lundgrenalex/evm-proxy-node
-  tag: "v0.1.4"
+  tag: "v0.1.5"
   pullPolicy: IfNotPresent
   digest: ""
 

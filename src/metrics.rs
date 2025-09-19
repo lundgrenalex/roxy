@@ -180,6 +180,13 @@ impl Metrics {
     pub(crate) fn handle_encode_error(err: prometheus::Error) {
         error!(?err, "failed to encode prometheus metrics");
     }
+
+    #[cfg(test)]
+    pub fn method_error_count(&self, upstream: &str, method: &str, error: &str) -> u64 {
+        self.method_errors_total
+            .with_label_values(&[upstream, method, error])
+            .get()
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.5
+
+- Added a minimal integration test harness (`tests/integration/basic.rs`) that spins a local upstream and validates end-to-end proxying.
+- Logged upstream transport failures with structured WARN entries, improving troubleshooting of dropped connections.
+- Bumped default version references and Helm chart tag to `v0.1.5`.
+- Fixed JSON-RPC error metrics to handle gzip-compressed upstream responses, keeping `roxy_rpc_method_errors_total` accurate.
+- Added unit coverage for ID-less, compressed error responses to guard the regression.
+
 ## v0.1.4
 
 - Raised default per-upstream timeout to 5 minutes and max body size to 10 MiB across config, examples, and Helm values (Chainstack profile included).
