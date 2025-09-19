@@ -19,6 +19,7 @@ pub struct Metrics {
     latency_seconds: HistogramVec,
     method_calls_total: IntCounterVec,
     method_latency_seconds: HistogramVec,
+    method_errors_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -76,6 +77,12 @@ impl Metrics {
         )?;
         registry.register(Box::new(latency_seconds.clone()))?;
 
+        let method_errors_total = IntCounterVec::new(
+            Opts::new("rpc_method_errors_total", "JSON-RPC method error counts").namespace("proxy"),
+            &["upstream", "method", "error"],
+        )?;
+        registry.register(Box::new(method_errors_total.clone()))?;
+
         Ok(Self {
             registry,
             requests_total,
@@ -85,6 +92,7 @@ impl Metrics {
             latency_seconds,
             method_calls_total,
             method_latency_seconds,
+            method_errors_total,
         })
     }
 
@@ -146,6 +154,13 @@ impl Metrics {
                 .with_label_values(&[upstream, method.as_str()])
                 .observe(value);
         }
+    }
+
+    /// Record JSON-RPC errors emitted by upstreams, bucketed by method and error code.
+    pub fn record_method_errors(&self, upstream: &str, method: &str, error: &str) {
+        self.method_errors_total
+            .with_label_values(&[upstream, method, error])
+            .inc();
     }
 
     /// Snapshot all metric families for Prometheus exposition.
@@ -212,5 +227,18 @@ mod tests {
 
         assert_eq!(first, 1);
         assert_eq!(second, 1);
+    }
+
+    #[test]
+    fn record_method_errors_increments_counter() {
+        let metrics = Metrics::new().expect("metrics constructed");
+        metrics.record_method_errors("gnosis", "eth_call", "execution_error");
+
+        let count = metrics
+            .method_errors_total
+            .with_label_values(&["gnosis", "eth_call", "execution_error"])
+            .get();
+
+        assert_eq!(count, 1);
     }
 }

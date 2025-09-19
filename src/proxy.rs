@@ -15,7 +15,9 @@ use axum::Error as AxumError;
 use axum::Router;
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::StreamExt;
+use http_body_util::BodyExt;
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::time::timeout;
 use tower::ServiceBuilder;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
@@ -168,10 +170,33 @@ pub(crate) async fn proxy_handler(
             }
 
             let (mut parts, body) = response.into_parts();
+            let collected = body.collect().await.map_err(|err| {
+                state
+                    .metrics
+                    .record_error(route.name(), &method, "upstream_body");
+                ProxyError::BodyRead {
+                    reason: err.to_string(),
+                }
+            })?;
+            let body_bytes = collected.to_bytes();
+
+            if !rpc_methods.is_empty() {
+                let error_labels = extract_rpc_error_labels(body_bytes.as_ref());
+                if !error_labels.is_empty() {
+                    for method_name in &rpc_methods {
+                        for error in &error_labels {
+                            state
+                                .metrics
+                                .record_method_errors(route.name(), method_name, error);
+                        }
+                    }
+                }
+            }
+
             parts
                 .headers
                 .append(header::VIA, HeaderValue::from_static("1.1 roxy"));
-            Ok(Response::from_parts(parts, body))
+            Ok(Response::from_parts(parts, Body::from(body_bytes)))
         }
         Ok(Err(err)) => {
             state
@@ -302,6 +327,50 @@ fn extract_methods(bytes: &[u8]) -> Result<Vec<String>, serde_json::Error> {
                 .collect())
         }
         _ => Ok(Vec::new()),
+    }
+}
+
+fn extract_rpc_error_labels(bytes: &[u8]) -> Vec<String> {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(Value::Array(values)) => values
+            .iter()
+            .filter_map(error_label_from_value)
+            .map(|label| label.to_string())
+            .collect(),
+        Ok(value) => error_label_from_value(&value)
+            .map(|label| vec![label.to_string()])
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn error_label_from_value(value: &Value) -> Option<&'static str> {
+    let error = value.get("error")?;
+    let code = error.get("code")?;
+    if let Some(code) = code.as_i64() {
+        map_jsonrpc_error(code)
+    } else if let Some(code) = code.as_u64() {
+        map_jsonrpc_error(code as i64)
+    } else {
+        None
+    }
+}
+
+fn map_jsonrpc_error(code: i64) -> Option<&'static str> {
+    match code {
+        -32700 => Some("parse_error"),
+        -32600 => Some("invalid_request"),
+        -32601 => Some("method_not_found"),
+        -32602 => Some("invalid_params"),
+        -32603 => Some("internal_error"),
+        -32000 => Some("execution_error"),
+        -32001 => Some("resource_not_found"),
+        -32002 => Some("resource_unavailable"),
+        -32003 => Some("transaction_rejected"),
+        -32004 => Some("method_not_supported"),
+        -32005 => Some("limit_exceeded"),
+        3 => Some("revert_error"),
+        _ => None,
     }
 }
 
@@ -558,5 +627,17 @@ upstreams:
             }
             other => panic!("expected upstream timeout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extract_rpc_error_labels_detects_known_codes() {
+        let single =
+            br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution error"}}"#;
+        let labels = extract_rpc_error_labels(single);
+        assert_eq!(labels, vec!["execution_error".to_string()]);
+
+        let batch = br#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32601}}, {"jsonrpc":"2.0","id":2,"result":"0x1"}]"#;
+        let labels = extract_rpc_error_labels(batch);
+        assert_eq!(labels, vec!["method_not_found".to_string()]);
     }
 }

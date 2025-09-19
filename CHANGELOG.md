@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.3
+
+- Added per-method JSON-RPC error counter (`roxy_rpc_method_errors_total`) with labelled buckets (parse errors, invalid params, execution errors, etc.).
+- Proxy now inspects upstream responses and records method-specific latency/errors without leaving the Hyper fast path.
+
 ## v0.1.2
 
 - Added per-method latency histogram (`roxy_rpc_method_latency_seconds_bucket`) to accompany method call counts.
